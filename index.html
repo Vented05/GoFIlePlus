@@ -46,12 +46,14 @@ const canDir = "showDirectoryPicker" in window;
 
 async function tokens(force) {
   if (!force && tok && Date.now() - tok.t < 3.4 * 3600e3) return tok;
-  let r = await fetch(px(API + "/accounts"), { method: "POST" }), j = await r.json();
-  if (!j.data?.token) throw Error("Couldn't start a Gofile session.");
+  let r, j;
+  try { r = await fetch(px(API + "/accounts"), { method: "POST" }); } catch (e) { throw Error("Can't reach your Worker at " + PROXY + " (wrong address, or ALLOWED_ORIGIN doesn't match this site)."); }
+  j = await r.json().catch(() => ({}));
+  if (!j.data?.token) throw Error("Worker answered, but Gofile gave no session (HTTP " + r.status + ").");
   const g = j.data.token;
-  r = await fetch(WT_URL, { method: "POST", headers: { "Content-Type": "application/json", "X-Install": iid }, body: JSON.stringify({ guestToken: g }) });
+  try { r = await fetch(px(WT_URL), { method: "POST", headers: { "Content-Type": "application/json", "X-Install": iid }, body: JSON.stringify({ guestToken: g }) }); } catch (e) { throw Error("Token request failed to reach the Worker."); }
   const w = await r.json().catch(() => ({}));
-  if (!w.data?.websiteToken) throw Error("Token service refused the request" + (w.message ? ": " + w.message : "."));
+  if (!w.data?.websiteToken) throw Error("Token service refused the request (HTTP " + r.status + ")" + (w.message ? ": " + w.message : "."));
   return tok = { g, w: w.data.websiteToken, t: Date.now() };
 }
 const H = () => ({ Authorization: "Bearer " + tok.g, "x-website-token": tok.w, "x-bl": "en-US" });
