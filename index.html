@@ -46,7 +46,11 @@ window.fetch = async (u, o = {}) => {
 addEventListener("error", e => dbg("JS error:", e.message)); addEventListener("unhandledrejection", e => dbg("Unhandled:", e.reason?.message || e.reason));
 const px = u => PROXY + "/p?u=" + encodeURIComponent(u);
 const hs = n => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : n < 1073741824 ? (n / 1048576).toFixed(1) + " MB" : (n / 1073741824).toFixed(2) + " GB";
-const safe = s => (String(s).replace(/[<>:"\/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/, "").slice(0, 150)) || "_";
+const safe = s => { // long names are shortened in the MIDDLE so the file extension survives
+  s = String(s).replace(/[<>:"\/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/, "");
+  if (s.length > 150) { const i = s.lastIndexOf("."), ext = i > 0 && s.length - i <= 12 ? s.slice(i) : ""; s = s.slice(0, 150 - ext.length).replace(/[. ]+$/, "") + ext; }
+  return s || "_";
+};
 let tok = null, root = null, meta = new Map(), cancel = false, dirHandle = null, busy = false;
 const iid = localStorage.gfp_id || (localStorage.gfp_id = crypto.randomUUID());
 
@@ -206,6 +210,6 @@ $("test").onclick = async () => {
   try { const r = await fetch(px(API + "/accounts"), { method: "POST" }); dbg("worker reply:", (await r.text()).slice(0, 160)); } catch (e) {}
   try { await tokens(true); dbg("TOKENS OK"); } catch (e) { dbg("TOKENS FAILED:", e.message); }
 };
-dbg("GoFile+ build 3 | page origin:", location.origin, "| worker:", PROXY);
+dbg("GoFile+ build 4 | page origin:", location.origin, "| worker:", PROXY);
 upd();
 </script></body></html>
