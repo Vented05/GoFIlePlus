@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>GoFile+</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+:root{--bg:#f6f7f9;--fg:#111827;--mut:#6b7280;--card:#fff;--bd:#e5e7eb;--ac:#2563eb}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1115;--fg:#e5e7eb;--mut:#9ca3af;--card:#181b22;--bd:#2a2f3a;--ac:#60a5fa}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px system-ui,sans-serif;padding:env(safe-area-inset-top) 12px env(safe-area-inset-bottom)}
+main{max-width:760px;margin:0 auto;padding:14px 0 40px}h1{margin:6px 0 12px}
+.row{display:flex;gap:8px}input[type=text]{flex:1;min-width:0;padding:12px;border:1px solid var(--bd);border-radius:10px;background:var(--card);color:var(--fg);font-size:16px}
+button{padding:12px 14px;border:1px solid var(--bd);border-radius:10px;background:var(--card);color:var(--fg);font-size:15px}
+button.p{background:var(--ac);color:#fff;border-color:var(--ac);font-weight:600}button:disabled{opacity:.45}
+#info,#st,.mut{color:var(--mut);font-size:14px;margin:10px 2px}
+#tree{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:4px;max-height:55vh;overflow:auto}
+.it{display:flex;align-items:center;gap:8px;padding:9px 6px;border-radius:8px}.it:active{background:var(--bd)}
+.it .n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.it .s{color:var(--mut);font-size:13px}
+.kids{margin-left:18px;border-left:1px solid var(--bd);padding-left:4px}.it input{width:20px;height:20px}
+.bar{height:8px;background:var(--bd);border-radius:6px;overflow:hidden;margin:8px 0}.bar i{display:block;height:100%;width:0;background:var(--ac)}
+#bt{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+</style></head><body><main>
+<h1>GoFile+</h1>
+<div class="row"><input id="link" type="text" inputmode="url" placeholder="Paste a gofile.io link" autocomplete="off"><button class="p" id="show">Show</button></div>
+<div id="info">Paste a link and tap Show.</div>
+<div id="tree" hidden></div>
+<div class="mut" id="mode"></div>
+<div id="bt"><button class="p" id="all" disabled>Download all</button><button id="sel" disabled>Download selected</button><button id="dir" hidden>Choose folder</button><button id="cx" disabled>Cancel</button></div>
+<div class="bar"><i id="pb"></i></div><div id="st"></div>
+</main>
+<script>
+// ---- CONFIG: deploy worker.js (Cloudflare Workers) and put its URL here ----
+const PROXY = "https://gofilplus.christianhulk05.workers.dev";
+const WT_URL = "https://api.prevtool.com/w"; // needs CORS for your github.io origin
+const API = "https://api.gofile.io", PAGE = 1000, PART = 150 * 1048576;
+const $ = id => document.getElementById(id);
+const px = u => PROXY + "/p?u=" + encodeURIComponent(u);
+const hs = n => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : n < 1073741824 ? (n / 1048576).toFixed(1) + " MB" : (n / 1073741824).toFixed(2) + " GB";
+const safe = s => (String(s).replace(/[<>:"\/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/, "").slice(0, 150)) || "_";
+let tok = null, root = null, meta = new Map(), cancel = false, dirHandle = null, busy = false;
+const iid = localStorage.gfp_id || (localStorage.gfp_id = crypto.randomUUID());
+
+// ---- remembered folder (desktop Chromium only), stored in IndexedDB ----
+const idb = () => new Promise((ok, no) => { const r = indexedDB.open("gfp", 1); r.onupgradeneeded = () => r.result.createObjectStore("k"); r.onsuccess = () => ok(r.result); r.onerror = no; });
+const kv = async (m, k, v) => { const d = await idb(); return new Promise((ok, no) => { const q = d.transaction("k", m === "get" ? "readonly" : "readwrite").objectStore("k")[m](...(m === "put" ? [v, k] : [k])); q.onsuccess = () => ok(q.result); q.onerror = no; }); };
+const canDir = "showDirectoryPicker" in window;
+
+async function tokens(force) {
+  if (!force && tok && Date.now() - tok.t < 3.4 * 3600e3) return tok;
+  let r = await fetch(px(API + "/accounts"), { method: "POST" }), j = await r.json();
+  if (!j.data?.token) throw Error("Couldn't start a Gofile session.");
+  const g = j.data.token;
+  r = await fetch(WT_URL, { method: "POST", headers: { "Content-Type": "application/json", "X-Install": iid }, body: JSON.stringify({ guestToken: g }) });
+  const w = await r.json().catch(() => ({}));
+  if (!w.data?.websiteToken) throw Error("Token service refused the request" + (w.message ? ": " + w.message : "."));
+  return tok = { g, w: w.data.websiteToken, t: Date.now() };
+}
+const H = () => ({ Authorization: "Bearer " + tok.g, "x-website-token": tok.w, "x-bl": "en-US" });
+async function contents(id) {
+  await tokens(); let kids = {}, data, retried = false;
+  for (let p = 1; p <= 30;) {
+    const r = await fetch(px(`${API}/contents/${encodeURIComponent(id)}?page=${p}&pageSize=${PAGE}&sortField=name&sortDirection=1`), { headers: H() });
+    const j = await r.json().catch(() => ({})), s = j.status;
+    if ((s === "error-token" || s === "error-auth") && !retried) { retried = true; await tokens(true); continue; }
+    if (s === "error-rateLimit") throw Error("Gofile is rate limiting. Wait ~30 s and retry.");
+    if (s === "error-notFound") throw Error("Link not found (deleted or expired).");
+    if (s && /password/i.test(s) || j.data?.passwordStatus) throw Error("Password-protected links aren't supported yet.");
+    if (s !== "ok") throw Error("Gofile error: " + (s || r.status));
+    const c = j.data.children || {}, n = Object.keys(kids).length;
+    if (p === 1) data = j.data;
+    Object.assign(kids, c);
+    if (Object.keys(c).length < PAGE || (p > 1 && Object.keys(kids).length === n)) break;
+    p++;
+  }
+  data.items = Object.entries(kids).map(([k, v]) => v.type === "folder"
+    ? { t: "d", name: v.name, code: v.code || v.id || k, n: v.childrenCount || 0 }
+    : { t: "f", name: v.name, id: v.id || k, size: +v.size || 0, link: v.link }).sort((a, b) => (a.t > b.t) - (a.t < b.t) || a.name.localeCompare(b.name));
+  return data;
+}
+
+// ---- tree ----
+function addItems(box, items, parts) {
+  if (!items.length) box.innerHTML = '<div class="mut">(empty)</div>';
+  for (const it of items) {
+    const row = document.createElement("div"); row.className = "it";
+    const cb = Object.assign(document.createElement("input"), { type: "checkbox" }); cb.onclick = e => { e.stopPropagation(); upd(); };
+    const nm = document.createElement("span"); nm.className = "n"; nm.textContent = (it.t === "d" ? "📁 " : "📄 ") + it.name;
+    const sz = document.createElement("span"); sz.className = "s"; sz.textContent = it.t === "d" ? it.n + " items" : hs(it.size);
+    row.append(cb, nm, sz); box.append(row);
+    const m = { ...it, parts: [...parts, it.name], cb }; meta.set(row, m);
+    if (it.t === "d") {
+      const kids = document.createElement("div"); kids.className = "kids"; kids.hidden = true; box.append(kids); let loaded = false;
+      row.onclick = async () => {
+        kids.hidden = !kids.hidden; if (kids.hidden || loaded) return;
+        kids.innerHTML = '<div class="mut">Loading…</div>';
+        try { const d = await contents(it.code); kids.innerHTML = ""; addItems(kids, d.items, m.parts); loaded = true; }
+        catch (e) { kids.innerHTML = '<div class="mut">⚠ ' + e.message + " (tap folder to retry)</div>"; }
+      };
+    } else row.onclick = e => { if (e.target !== cb && !busy) saveOne(m); };
+  }
+}
+const sel = () => [...meta].filter(([, m]) => m.cb.checked).map(([, m]) => m);
+function upd() { const n = sel().length; $("sel").disabled = !n || busy; $("sel").textContent = n ? `Download selected (${n})` : "Download selected"; $("all").disabled = !root || busy; $("cx").disabled = !busy; $("show").disabled = busy; }
+
+$("show").onclick = async () => {
+  const m = $("link").value.match(/gofile\.io\/d\/([\w-]+)/i) || $("link").value.trim().match(/^([\w-]{4,64})$/);
+  if (!m) { $("info").textContent = "That doesn't look like a Gofile link."; return; }
+  $("info").textContent = "Loading…"; $("tree").hidden = true; meta.clear(); root = null; upd();
+  try {
+    const d = await contents(m[1]); root = { code: m[1], name: d.name || m[1] };
+    $("tree").innerHTML = ""; $("tree").hidden = false; addItems($("tree"), d.items, []);
+    $("info").textContent = `${root.name} — ${d.childrenCount || d.items.length} items — tap a folder to open it, tap a file to save it`;
+  } catch (e) { $("info").textContent = "⚠ " + e.message; }
+  upd();
+};
+$("link").onkeydown = e => e.key === "Enter" && $("show").click();
+
+// ---- downloading ----
+async function fileResp(f) {
+  for (let a = 0; a < 3; a++) {
+    await tokens(a > 0); const r = await fetch(px(f.link), { headers: { Authorization: "Bearer " + tok.g } });
+    if (r.ok && !/text\/html/.test(r.headers.get("content-type") || "")) return r;
+    if (r.status === 404) throw Error("not found");
+  }
+  throw Error("download refused");
+}
+async function saveOne(f) {
+  busy = true; upd(); $("st").textContent = "Downloading " + f.name + "…";
+  try { const b = await (await fileResp(f)).blob(); const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(b), download: safe(f.name) }); a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 6e4); $("st").textContent = "Saved " + f.name; }
+  catch (e) { $("st").textContent = "⚠ " + f.name + ": " + e.message; }
+  busy = false; upd();
+}
+async function scan(roots) {
+  const out = [], q = [...roots], seen = new Set();
+  while (q.length) {
+    if (cancel) throw Error("Cancelled"); const x = q.shift();
+    if (x.t === "f") { if (!seen.has(x.id)) { seen.add(x.id); out.push({ ...x, dir: x.parts.slice(0, -1) }); } continue; }
+    $("st").textContent = `Scanning folders… ${out.length} files found`;
+    const d = await contents(x.code);
+    for (const it of d.items) it.t === "d" ? q.push({ t: "d", code: it.code, parts: [...x.parts, it.name] }) : seen.has(it.id) || (seen.add(it.id), out.push({ ...it, dir: x.parts }));
+  }
+  const used = new Set();
+  for (const f of out) { // unique, safe paths
+    let segs = [...f.dir.map(safe), safe(f.name)], p = segs.join("/").toLowerCase(), n = 2;
+    while (used.has(p)) { const nm = safe(f.name), i = nm.lastIndexOf("."); segs[segs.length - 1] = (i > 0 ? nm.slice(0, i) + ` (${n})` + nm.slice(i) : nm + ` (${n})`); p = segs.join("/").toLowerCase(); n++; }
+    used.add(p); f.path = segs;
+  }
+  return out;
+}
+async function start(selected) {
+  const roots = selected ? sel().map(m => m.t === "d" ? { t: "d", code: m.code, parts: m.parts } : { ...m }) : [{ t: "d", code: root.code, parts: [] }];
+  cancel = false; busy = true; upd(); let failed = [];
+  try {
+    if (canDir && !dirHandle) await chooseDir();
+    const files = await scan(roots), total = files.reduce((s, f) => s + f.size, 0); let done = 0, bytes = 0;
+    const tick = () => { $("pb").style.width = total ? bytes / total * 100 + "%" : "0"; $("st").textContent = `${done}/${files.length} files — ${hs(bytes)} of ${hs(total)}${failed.length ? " — " + failed.length + " failed" : ""}`; };
+    let base = null; if (dirHandle) { base = await dirHandle.getDirectoryHandle(safe(root.name), { create: true }); }
+    let zip = null, zb = 0, part = 1; const parts = Math.max(1, Math.ceil(total / PART));
+    const flush = async () => { if (!zip) return; const b = await zip.generateAsync({ type: "blob", compression: "STORE" }); const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(b), download: `${safe(root.name)}-part${part++}of${parts}.zip` }); a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 6e4); zip = null; zb = 0; await new Promise(r => setTimeout(r, 1500)); };
+    for (const f of files) {
+      if (cancel) break;
+      try {
+        const r = await fileResp(f);
+        if (base) { // real folders on disk
+          let d = base; for (const s of f.path.slice(0, -1)) d = await d.getDirectoryHandle(s, { create: true });
+          const w = await (await d.getFileHandle(f.path.at(-1), { create: true })).createWritable(), rd = r.body.getReader();
+          for (;;) { const { done: dn, value } = await rd.read(); if (dn) break; await w.write(value); bytes += value.length; tick(); if (cancel) { await w.abort(); throw Error("Cancelled"); } }
+          await w.close();
+        } else { // zip parts (mobile / browsers without folder access)
+          const buf = await r.arrayBuffer(); bytes += buf.byteLength; (zip ||= new JSZip()).file(f.path.join("/"), buf); zb += buf.byteLength; if (zb >= PART) await flush();
+        }
+        done++;
+      } catch (e) { if (e.message === "Cancelled") break; failed.push(f.path.join("/") + " [" + e.message + "]"); }
+      tick();
+    }
+    if (!cancel) await flush();
+    if (failed.length && !cancel) { const b = new Blob(["Files that failed:\n" + failed.join("\n")], { type: "text/plain" }); Object.assign(document.createElement("a"), { href: URL.createObjectURL(b), download: "GoFile+ failed files.txt" }).click(); }
+    tick(); $("st").textContent += cancel ? " — cancelled" : " — done";
+  } catch (e) { $("st").textContent = "⚠ " + e.message; }
+  busy = false; upd();
+}
+async function chooseDir() {
+  dirHandle = await showDirectoryPicker({ mode: "readwrite", id: "gofileplus" }); await kv("put", "dir", dirHandle); $("dir").textContent = "Folder: " + dirHandle.name + " (change)";
+}
+$("all").onclick = () => start(false); $("sel").onclick = () => start(true); $("cx").onclick = () => { cancel = true; };
+if (canDir) {
+  $("dir").hidden = false; $("mode").textContent = "Files are saved into real folders in the folder you choose (remembered).";
+  $("dir").onclick = () => chooseDir().catch(() => {});
+  kv("get", "dir").then(async h => { if (h && (await h.queryPermission({ mode: "readwrite" })) !== "denied") { dirHandle = h; $("dir").textContent = "Folder: " + h.name + " (change)"; } }).catch(() => {});
+} else $("mode").textContent = "Phones can't save into folders, so “Download all” gives ZIP parts (about 150 MB each) with your folders inside. Tap a single file to save it directly.";
+upd();
+</script></body></html>
