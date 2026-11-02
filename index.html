@@ -17,6 +17,7 @@ button.p{background:var(--ac);color:#fff;border-color:var(--ac);font-weight:600}
 .it .n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.it .s{color:var(--mut);font-size:13px}
 .kids{margin-left:18px;border-left:1px solid var(--bd);padding-left:4px}.it input{width:20px;height:20px}
 .bar{height:8px;background:var(--bd);border-radius:6px;overflow:hidden;margin:8px 0}.bar i{display:block;height:100%;width:0;background:var(--ac)}
+#dbg{margin-top:18px;font-size:13px;color:var(--mut)}#log{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:8px;max-height:34vh;overflow:auto;white-space:pre-wrap;word-break:break-all;font:12px ui-monospace,monospace;color:var(--fg)}
 #bt{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
 </style></head><body><main>
 <h1>GoFile+</h1>
@@ -26,6 +27,7 @@ button.p{background:var(--ac);color:#fff;border-color:var(--ac);font-weight:600}
 <div class="mut" id="mode"></div>
 <div id="bt"><button class="p" id="all" disabled>Download all</button><button id="sel" disabled>Download selected</button><button id="dir" hidden>Choose folder</button><button id="cx" disabled>Cancel</button></div>
 <div class="bar"><i id="pb"></i></div><div id="st"></div>
+<details id="dbg" open><summary>Debug log</summary><div class="row" style="margin:8px 0"><button id="test">Test connection</button><button id="cp">Copy log</button></div><pre id="log"></pre></details>
 </main>
 <script>
 // ---- CONFIG: deploy worker.js (Cloudflare Workers) and put its URL here ----
@@ -33,6 +35,15 @@ const PROXY = "https://gofileplus.christianhulk05.workers.dev";
 const WT_URL = "https://api.prevtool.com/w"; // needs CORS for your github.io origin
 const API = "https://api.gofile.io", PAGE = 1000, PART = 150 * 1048576;
 const $ = id => document.getElementById(id);
+const LOG = [];
+const dbg = (...a) => { LOG.push(new Date().toLocaleTimeString() + "  " + a.join(" ")); const l = $("log"); if (l) { l.textContent = LOG.join("\n"); l.scrollTop = l.scrollHeight; } };
+const _fetch = window.fetch.bind(window);
+window.fetch = async (u, o = {}) => {
+  const t0 = performance.now(), m = o.method || "GET", s = decodeURIComponent(String(u).replace(PROXY + "/p?u=", "VIA-WORKER ")).slice(0, 110);
+  try { const r = await _fetch(u, o); dbg(m, s, "->", r.status, Math.round(performance.now() - t0) + "ms"); return r; }
+  catch (e) { dbg(m, s, "-> BLOCKED/FAILED:", e.name + ": " + e.message, "(CORS, wrong address, or no network)"); throw e; }
+};
+addEventListener("error", e => dbg("JS error:", e.message)); addEventListener("unhandledrejection", e => dbg("Unhandled:", e.reason?.message || e.reason));
 const px = u => PROXY + "/p?u=" + encodeURIComponent(u);
 const hs = n => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : n < 1073741824 ? (n / 1048576).toFixed(1) + " MB" : (n / 1073741824).toFixed(2) + " GB";
 const safe = s => (String(s).replace(/[<>:"\/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/, "").slice(0, 150)) || "_";
@@ -111,7 +122,7 @@ $("show").onclick = async () => {
     const d = await contents(m[1]); root = { code: m[1], name: d.name || m[1] };
     $("tree").innerHTML = ""; $("tree").hidden = false; addItems($("tree"), d.items, []);
     $("info").textContent = `${root.name} — ${d.childrenCount || d.items.length} items — tap a folder to open it, tap a file to save it`;
-  } catch (e) { $("info").textContent = "⚠ " + e.message; }
+  } catch (e) { $("info").textContent = "⚠ " + e.message; dbg("Show failed:", e.message); }
   upd();
 };
 $("link").onkeydown = e => e.key === "Enter" && $("show").click();
@@ -189,5 +200,12 @@ if (canDir) {
   $("dir").onclick = () => chooseDir().catch(() => {});
   kv("get", "dir").then(async h => { if (h && (await h.queryPermission({ mode: "readwrite" })) !== "denied") { dirHandle = h; $("dir").textContent = "Folder: " + h.name + " (change)"; } }).catch(() => {});
 } else $("mode").textContent = "Phones can't save into folders, so “Download all” gives ZIP parts (about 150 MB each) with your folders inside. Tap a single file to save it directly.";
+$("cp").onclick = () => navigator.clipboard.writeText(LOG.join("\n")).then(() => { $("cp").textContent = "Copied!"; setTimeout(() => $("cp").textContent = "Copy log", 1500); });
+$("test").onclick = async () => {
+  dbg("--- test --- page origin:", location.origin);
+  try { const r = await fetch(px(API + "/accounts"), { method: "POST" }); dbg("worker reply:", (await r.text()).slice(0, 160)); } catch (e) {}
+  try { await tokens(true); dbg("TOKENS OK"); } catch (e) { dbg("TOKENS FAILED:", e.message); }
+};
+dbg("GoFile+ build 3 | page origin:", location.origin, "| worker:", PROXY);
 upd();
 </script></body></html>
