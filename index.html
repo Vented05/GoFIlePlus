@@ -72,6 +72,18 @@ async function tokens(force) {
   return tok = { g, w: w.data.websiteToken, t: Date.now() };
 }
 const H = () => ({ Authorization: "Bearer " + tok.g, "x-website-token": tok.w, "x-bl": "en-US" });
+// Some Gofile names arrive without an extension: recover it from the download link, else from the file type.
+const KNOWN = /\.(mp4|mkv|webm|mov|avi|mpg|mpeg|flv|3gp|wmv|ts|m4v|jpg|jpeg|png|gif|webp|heic|mp3|m4a|ogg|wav|flac|pdf|zip|rar|7z|txt|doc|docx|xls|xlsx|ppt|pptx|apk|exe|iso)$/i;
+const MIME = { "video/mp4": ".mp4", "video/x-matroska": ".mkv", "video/webm": ".webm", "video/quicktime": ".mov", "video/x-msvideo": ".avi", "video/mpeg": ".mpg", "video/x-flv": ".flv", "video/3gpp": ".3gp", "video/x-ms-wmv": ".wmv", "video/mp2t": ".ts", "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp", "image/heic": ".heic", "audio/mpeg": ".mp3", "audio/mp4": ".m4a", "audio/ogg": ".ogg", "audio/wav": ".wav", "application/pdf": ".pdf", "application/zip": ".zip" };
+let rawLogged = 0;
+function fixName(v) {
+  const n = String(v.name || "file");
+  if (rawLogged++ < 3) dbg("raw name:", JSON.stringify(n), "| type:", v.mimetype, "| link tail:", String(v.link || "").split("/").pop());
+  if (KNOWN.test(n)) return n;
+  try { const t = decodeURIComponent(String(v.link).split("?")[0].split("/").pop() || ""), m = t.match(/\.[A-Za-z0-9]{1,6}$/); if (m) return n + m[0]; } catch (e) {}
+  const e = MIME[String(v.mimetype || "").toLowerCase().split(";")[0]];
+  return e ? n + e : n;
+}
 async function contents(id) {
   await tokens(); let kids = {}, data, retried = false;
   for (let p = 1; p <= 30;) {
@@ -90,7 +102,7 @@ async function contents(id) {
   }
   data.items = Object.entries(kids).map(([k, v]) => v.type === "folder"
     ? { t: "d", name: v.name, code: v.code || v.id || k, n: v.childrenCount || 0 }
-    : { t: "f", name: v.name, id: v.id || k, size: +v.size || 0, link: v.link }).sort((a, b) => (a.t > b.t) - (a.t < b.t) || a.name.localeCompare(b.name));
+    : { t: "f", name: fixName(v), id: v.id || k, size: +v.size || 0, link: v.link }).sort((a, b) => (a.t > b.t) - (a.t < b.t) || a.name.localeCompare(b.name));
   return data;
 }
 
@@ -135,7 +147,7 @@ $("link").onkeydown = e => e.key === "Enter" && $("show").click();
 async function fileResp(f) {
   for (let a = 0; a < 3; a++) {
     await tokens(a > 0); const r = await fetch(px(f.link), { headers: { Authorization: "Bearer " + tok.g } });
-    if (r.ok && !/text\/html/.test(r.headers.get("content-type") || "")) return r;
+    if (r.ok && !/text\/html|application\/json/.test(r.headers.get("content-type") || "")) return r;
     if (r.status === 404) throw Error("not found");
   }
   throw Error("download refused");
@@ -183,10 +195,13 @@ async function start(selected) {
           for (;;) { const { done: dn, value } = await rd.read(); if (dn) break; await w.write(value); bytes += value.length; tick(); if (cancel) { await w.abort(); throw Error("Cancelled"); } }
           await w.close();
         } else { // zip parts (mobile / browsers without folder access)
-          const buf = await r.arrayBuffer(); bytes += buf.byteLength; (zip ||= new JSZip()).file(f.path.join("/"), buf); zb += buf.byteLength; if (zb >= PART) await flush();
+          const buf = await r.arrayBuffer();
+          if (done < 5) dbg("file:", f.path.join("/"), "| got", buf.byteLength, "of", f.size, "bytes | type:", r.headers.get("content-type"), "| first bytes:", [...new Uint8Array(buf, 0, Math.min(12, buf.byteLength))].map(b => b.toString(16).padStart(2, "0")).join(" "));
+          if (f.size && buf.byteLength !== f.size) throw Error("wrong size " + buf.byteLength + " of " + f.size);
+          bytes += buf.byteLength; (zip ||= new JSZip()).file(f.path.join("/"), buf); zb += buf.byteLength; if (zb >= PART) await flush();
         }
         done++;
-      } catch (e) { if (e.message === "Cancelled") break; failed.push(f.path.join("/") + " [" + e.message + "]"); }
+      } catch (e) { if (e.message === "Cancelled") break; failed.push(f.path.join("/") + " [" + e.message + "]"); dbg("FAILED:", f.path.join("/"), e.message); }
       tick();
     }
     if (!cancel) await flush();
@@ -210,6 +225,6 @@ $("test").onclick = async () => {
   try { const r = await fetch(px(API + "/accounts"), { method: "POST" }); dbg("worker reply:", (await r.text()).slice(0, 160)); } catch (e) {}
   try { await tokens(true); dbg("TOKENS OK"); } catch (e) { dbg("TOKENS FAILED:", e.message); }
 };
-dbg("GoFile+ build 4 | page origin:", location.origin, "| worker:", PROXY);
+dbg("GoFile+ build 6 | page origin:", location.origin, "| worker:", PROXY);
 upd();
 </script></body></html>
