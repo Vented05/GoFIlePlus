@@ -289,8 +289,18 @@ async function chooseDir() {
 $("all").onclick = () => start(false); $("sel").onclick = () => start(true); $("cx").onclick = () => { cancel = true; };
 if (canDir) {
   $("dir").hidden = false; $("mode").textContent = "Files are saved into real folders in the folder you choose (remembered).";
-  $("dir").onclick = () => chooseDir().catch(() => {});
-  kv("get", "dir").then(async h => { if (h && (await h.queryPermission({ mode: "readwrite" })) !== "denied") { dirHandle = h; $("dir").textContent = "Folder: " + h.name + " (change)"; } }).catch(() => {});
+  let pendingDir = null;  // remembered folder whose permission Chrome reset to "ask": re-grant it on tap instead of failing mid-download
+  $("dir").onclick = async () => {
+    try {
+      if (pendingDir && !dirHandle && (await pendingDir.requestPermission({ mode: "readwrite" })) === "granted") { dirHandle = pendingDir; pendingDir = null; $("dir").textContent = "Folder: " + dirHandle.name + " (change)"; return; }
+      await chooseDir();
+    } catch (e) { dbg("Folder:", e.message); }
+  };
+  kv("get", "dir").then(async h => {
+    if (!h) return; const p = await h.queryPermission({ mode: "readwrite" });
+    if (p === "granted") { dirHandle = h; $("dir").textContent = "Folder: " + h.name + " (change)"; }
+    else if (p === "prompt") { pendingDir = h; $("dir").textContent = "Folder: " + h.name + " (tap to allow)"; }
+  }).catch(() => {});
 } else $("mode").textContent = "Phones can't save into folders, so “Download all” gives ZIP parts (about 150 MB each) with your folders inside. Tap a single file to save it directly.";
 $("cp").onclick = () => navigator.clipboard.writeText(LOG.join("\n")).then(() => { $("cp").textContent = "Copied!"; setTimeout(() => $("cp").textContent = "Copy log", 1500); });
 $("test").onclick = async () => {
@@ -298,6 +308,6 @@ $("test").onclick = async () => {
   try { const r = await fetch(px(API + "/accounts"), { method: "POST" }); dbg("worker reply:", (await r.text()).slice(0, 160)); } catch (e) {}
   try { await tokens(true); dbg("TOKENS OK"); } catch (e) { dbg("TOKENS FAILED:", e.message); }
 };
-dbg("GoFile+ build 11 | page origin:", location.origin, "| worker:", PROXY);
+dbg("GoFile+ build 12 | page origin:", location.origin, "| worker:", PROXY);
 upd();
 </script></body></html>
